@@ -81,18 +81,19 @@ export function createHandler(config: WebsiteConfig, options: { clientRoot: stri
       if (options.knowledge && url.pathname.startsWith('/api/knowledge/metrics')) {
         const store = options.knowledge
         try {
-          if (url.pathname === '/api/knowledge/metrics') {
-            const catalog = await store.publicList()
+          if (url.pathname === '/api/knowledge/metrics' || url.pathname === '/api/knowledge/metrics/v2') {
+            const catalog = url.pathname.endsWith('/v2') ? await store.publicListV2() : await store.publicList()
             const etag = `"${catalog.revision}"`
             if (req.headers['if-none-match'] === etag) { res.writeHead(304, { ETag: etag, 'Cache-Control': 'no-store' }); res.end(); return }
             res.setHeader('ETag', etag)
             json(req, res, 200, catalog); return
           }
           const skillTarget = /^\/api\/knowledge\/metrics\/skills\/([^/]+)$/.exec(url.pathname)
-          if (url.pathname !== '/api/knowledge/metrics/skill' && !skillTarget) { json(req, res, 404, { error: 'NOT_FOUND' }); return }
-          const file = await store.openSkill(skillTarget ? decodeURIComponent(skillTarget[1]!) : undefined)
+          const versionTarget = /^\/api\/knowledge\/metrics\/v2\/skills\/([^/]+)\/([^/]+)$/.exec(url.pathname)
+          if (url.pathname !== '/api/knowledge/metrics/skill' && !skillTarget && !versionTarget) { json(req, res, 404, { error: 'NOT_FOUND' }); return }
+          const file = versionTarget ? await store.openSkillVersion(decodeURIComponent(versionTarget[1]!), decodeURIComponent(versionTarget[2]!)) : await store.openSkill(skillTarget ? decodeURIComponent(skillTarget[1]!) : undefined)
           // The address is fixed while the file is replaceable, so revalidate on the content hash instead of caching.
-          res.setHeader('Cache-Control', 'no-store')
+          res.setHeader('Cache-Control', versionTarget ? 'public, max-age=31536000, immutable' : 'no-store')
           res.setHeader('X-Skill-Name', file.name)
           res.setHeader('X-Skill-Sha256', file.sha256)
           await serveFile(req, res, file.root, file.segments, { type: file.type, expectedSize: file.size, etag: `"${file.sha256}"`, attachment: file.fileName })

@@ -18,13 +18,15 @@ export type MetricKnowledgeEntry = {
   knowledge_id: MetricKnowledgeIds
   knowledge_base_meta: MetricKnowledgeBaseMeta
   enabled: boolean
-  skill_names: string[]
+  skill_name: string | null
+  /** Preserves unpublished multi-reference rows until an administrator selects one skill. */
+  pending_skill_names?: string[] | undefined
   created_at: string
   updated_at: string
 }
 /** Skills are registered once and referenced by stable name from individual libraries. */
-export type MetricKnowledgeCatalog = { schemaVersion: 2; revision: string; updatedAt: string; skills: MetricKnowledgeSkill[]; items: MetricKnowledgeEntry[] }
-export type MetricKnowledgeInput = Omit<MetricKnowledgeEntry, 'id' | 'created_at' | 'updated_at' | 'skill_names'> & { id?: string | undefined; skill_names?: string[] | undefined }
+export type MetricKnowledgeCatalog = { schemaVersion: 2; revision: string; updatedAt: string; skills: MetricKnowledgeSkill[]; items: MetricKnowledgeEntry[]; legacy_skill_name?: string | null | undefined }
+export type MetricKnowledgeInput = Omit<MetricKnowledgeEntry, 'id' | 'created_at' | 'updated_at' | 'skill_name' | 'pending_skill_names'> & { id?: string | undefined; skill_name?: string | null | undefined }
 
 export const metricKnowledgeIdPattern = /^metrics-[a-z0-9]+(?:-[a-z0-9]+)*$/
 export const skillNamePattern = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
@@ -44,4 +46,15 @@ export const maxSkillFileName = 200
 
 export function validMetricKnowledgeId(value: unknown): value is string {
   return typeof value === 'string' && value.length <= maxKnowledgeId && metricKnowledgeIdPattern.test(value)
+}
+
+/** Historical stored names remain readable; these rules apply to newly added or renamed methods. */
+export function validWorkflowName(name: string): boolean {
+  return /^[A-Za-z0-9_-]{1,64}$/.test(name) && !['run_code', '__proto__', 'constructor', 'prototype'].includes(name)
+}
+export function legacyKnowledgeCompatible(entry: Pick<MetricKnowledgeEntry, 'skill_name' | 'pending_skill_names' | 'knowledge_retrieve_workflow_id'>, legacySkillName: string | null | undefined): boolean {
+  const workflows = entry.knowledge_retrieve_workflow_id
+  return legacySkillName !== undefined && !entry.pending_skill_names?.length && entry.skill_name === legacySkillName &&
+    ['get_card_index', 'get_card_meta', 'query_card_data'].every(name => Boolean(workflows[name]?.trim())) &&
+    (!Object.hasOwn(workflows, 'quer_card_data') || workflows.quer_card_data === workflows.query_card_data)
 }

@@ -19,6 +19,11 @@ export function createAdminHandler(releases: ReleaseAdmin, media: MediaStore, sy
         else { const data = await body(req); json(res, await knowledge.create(data.entry, data.revision)) }
         return true
       }
+      if (url.pathname === '/api/admin/knowledge/compatibility') {
+        method(req, ['PUT'])
+        const data = await body(req)
+        json(res, await knowledge.resolveLegacySkill(data.legacy_skill_name, data.revision)); return true
+      }
       if (url.pathname === '/api/admin/knowledge/skill' || url.pathname === '/api/admin/knowledge/skills') {
         method(req, url.pathname.endsWith('/skills') ? ['POST'] : ['POST', 'DELETE'])
         json(res, req.method === 'POST'

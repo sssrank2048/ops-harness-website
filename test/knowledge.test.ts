@@ -51,7 +51,7 @@ function entry(extra: Record<string, unknown> = {}) {
       knowledge_description: '零售业务的核心指标口径与报表说明。', indicators_cover: '1,200 项', reports_cover: '32 张', update_frequency: '每日 07:00',
       typical_indicators: ['GMV', '动销率'],
     },
-    enabled: true, skill_names: [], ...extra,
+    enabled: true, skill_name: null, ...extra,
   }
 }
 async function fixture(t: TestContext) {
@@ -127,11 +127,12 @@ test('the public catalog omits withdrawn entries, answers If-None-Match and neve
   assert.equal(response.status, 200)
   assert.equal(response.headers.get('cache-control'), 'no-store')
   const etag = response.headers.get('etag')
-  assert.equal(etag, `"${second.revision}"`)
+  assert.notEqual(etag, `"${second.revision}"`)
   const catalog = await response.json()
-  assert.equal(catalog.schemaVersion, 2); assert.equal(catalog.revision, second.revision)
+  assert.equal(catalog.schemaVersion, 1); assert.equal(etag, `"${catalog.revision}"`)
   assert.deepEqual(catalog.items.map((item: { id: string }) => item.id), ['metrics-retail'])
-  assert.deepEqual(catalog.items[0], first.entry)
+  assert.equal(catalog.items[0].skill_name, undefined)
+  assert.equal(catalog.items[0].knowledge_retrieve_workflow_id.quer_card_data, 'wf-card-data')
   assert.equal(catalog.updatedAt, second.updatedAt)
   const cached = await fetch(origin + '/api/knowledge/metrics', { headers: { 'If-None-Match': etag! } })
   assert.equal(cached.status, 304); assert.equal(cached.headers.get('etag'), etag)
@@ -162,9 +163,9 @@ test('multiple skills are registered, referenced by library and replaced by stab
   assert.deepEqual(await readdir(path.join(content, 'knowledge/skills')), [`${current.skill.sha256}.zip`])
   const listed = await read()
   assert.equal(listed.skills[0].sha256, current.skill.sha256)
-  assert.deepEqual(listed.items[0].skill_names, [])
+  assert.equal(listed.items[0].skill_name, null)
   assert.equal(listed.items[0].skill, undefined)
-  const pub = await (await fetch(origin + '/api/knowledge/metrics')).json()
+  const pub = await (await fetch(origin + '/api/knowledge/metrics/v2')).json()
   assert.equal(pub.skills[0].name, 'metric-skill'); assert.equal(pub.items[0].skill, undefined)
   const download = await fetch(publicSkill('metric-skill'))
   assert.equal(download.status, 200)
@@ -176,26 +177,26 @@ test('multiple skills are registered, referenced by library and replaced by stab
   assert.match(download.headers.get('content-disposition')!, /metric-skill\.zip$/)
   assert.deepEqual(Buffer.from(await download.arrayBuffer()), packaged)
   assert.equal((await fetch(publicSkill('metric-skill'), { headers: { 'If-None-Match': `"${current.skill.sha256}"` } })).status, 304)
-  assert.equal((await fetch(origin + '/api/knowledge/metrics/skill')).status, 200)
+  assert.equal((await fetch(origin + '/api/knowledge/metrics/skill')).status, 404)
   const flat = archive([{ name: 'SKILL.md', data: skillMarkdown('flat-skill') }])
   current = await (await upload(`${api}?name=flat.zip`, flat, { 'X-Revision': current.revision })).json()
   assert.equal(current.skill.name, 'flat-skill')
   assert.equal(current.skills.length, 2)
-  // The old unnamed address cannot pick an arbitrary file once more than one skill exists.
-  assert.equal((await (await fetch(origin + '/api/knowledge/metrics/skill')).json()).error, 'SKILL_NAME_REQUIRED')
-  assert.equal((await (await json('/api/admin/knowledge/skill', { revision: current.revision }, 'DELETE')).json()).error, 'SKILL_NAME_REQUIRED')
-  current = await (await json('/api/admin/knowledge/metrics-retail', { entry: entry({ skill_names: ['metric-skill', 'flat-skill'] }), revision: current.revision }, 'PUT')).json()
-  assert.deepEqual(current.entry.skill_names, ['metric-skill', 'flat-skill'])
-  current = await (await json('/api/admin/knowledge', { entry: entry({ id: 'metrics-media', tenant_id: 'tenant-media', enabled: false, skill_names: ['flat-skill'] }), revision: current.revision })).json()
-  assert.deepEqual(current.entry.skill_names, ['flat-skill'])
-  const invalid = await json('/api/admin/knowledge/metrics-retail', { entry: entry({ skill_names: ['unknown-skill'] }), revision: current.revision }, 'PUT')
+  // A fresh catalog with no historical public skill must not invent an identity from uploaded skills.
+  assert.equal((await (await fetch(origin + '/api/knowledge/metrics/skill')).json()).error, 'SKILL_NOT_FOUND')
+  assert.equal((await (await json('/api/admin/knowledge/skill', { revision: current.revision }, 'DELETE')).json()).error, 'SKILL_NOT_FOUND')
+  current = await (await json('/api/admin/knowledge/metrics-retail', { entry: entry({ skill_name: 'metric-skill' }), revision: current.revision }, 'PUT')).json()
+  assert.equal(current.entry.skill_name, 'metric-skill')
+  current = await (await json('/api/admin/knowledge', { entry: entry({ id: 'metrics-media', tenant_id: 'tenant-media', enabled: false, skill_name: 'flat-skill' }), revision: current.revision })).json()
+  assert.equal(current.entry.skill_name, 'flat-skill')
+  const invalid = await json('/api/admin/knowledge/metrics-retail', { entry: entry({ skill_name: 'unknown-skill' }), revision: current.revision }, 'PUT')
   assert.equal(invalid.status, 400); assert.equal((await invalid.json()).error, 'INVALID_SKILL_REFERENCE')
-  assert.equal((await json('/api/admin/knowledge/metrics-retail', { entry: entry({ skill_names: ['flat-skill', 'flat-skill'] }), revision: current.revision }, 'PUT')).status, 400)
+  assert.equal((await json('/api/admin/knowledge/metrics-retail', { entry: entry({ skill_name: ['flat-skill', 'flat-skill'] }), revision: current.revision }, 'PUT')).status, 400)
   const previous = listed.skills[0].sha256
   const plain = skillMarkdown('metric-skill', '新版指标技能')
   current = await (await upload(`${api}?name=SKILL.md`, plain, { 'X-Revision': current.revision })).json()
   assert.equal(current.skill.kind, 'md'); assert.equal(current.skills.length, 2)
-  assert.deepEqual((await read()).items[0].skill_names, ['metric-skill', 'flat-skill'])
+  assert.equal((await read()).items[0].skill_name, 'metric-skill')
   const replaced = await fetch(publicSkill('metric-skill'), { headers: { 'If-None-Match': `"${previous}"` } })
   assert.equal(replaced.status, 200)
   assert.equal(replaced.headers.get('etag'), `"${current.skill.sha256}"`)
@@ -204,9 +205,9 @@ test('multiple skills are registered, referenced by library and replaced by stab
   current = await (await upload(`${api}?name=again.md`, plain, { 'X-Revision': current.revision })).json()
   assert.equal((await readdir(path.join(content, 'knowledge/skills'))).length, 3)
   // A legacy editor omitting the new field must not clear explicit references.
-  const withoutReferences = entry(); delete (withoutReferences as Record<string, unknown>).skill_names
+  const withoutReferences = entry(); delete (withoutReferences as Record<string, unknown>).skill_name
   current = await (await json('/api/admin/knowledge/metrics-retail', { entry: withoutReferences, revision: current.revision }, 'PUT')).json()
-  assert.deepEqual(current.entry.skill_names, ['metric-skill', 'flat-skill'])
+  assert.equal(current.entry.skill_name, 'metric-skill')
   for (const [name, bytes] of [
     ['escape.zip', archive([{ name: '../SKILL.md', data: skillMarkdown() }])],
     ['backslash.zip', archive([{ name: 'metric-skill\\SKILL.md', data: skillMarkdown() }])],
@@ -229,7 +230,7 @@ test('multiple skills are registered, referenced by library and replaced by stab
   assert.ok(!(await readdir(path.join(content, 'knowledge/skills'))).some(name => name.endsWith('.upload')))
   const inUse = await json(`${api}/metric-skill`, { revision: current.revision }, 'DELETE')
   assert.equal(inUse.status, 409); assert.equal((await inUse.json()).error, 'SKILL_IN_USE')
-  current = await (await json('/api/admin/knowledge/metrics-retail', { entry: entry({ skill_names: [] }), revision: current.revision }, 'PUT')).json()
+  current = await (await json('/api/admin/knowledge/metrics-retail', { entry: entry({ skill_name: null }), revision: current.revision }, 'PUT')).json()
   // A withdrawn library still owns its reference and prevents removal.
   assert.equal((await (await json(`${api}/flat-skill`, { revision: current.revision }, 'DELETE')).json()).error, 'SKILL_IN_USE')
   current = await (await json(`${api}/metric-skill`, { revision: current.revision }, 'DELETE')).json()
@@ -243,72 +244,76 @@ test('multiple skills are registered, referenced by library and replaced by stab
   assert.equal((await readdir(path.join(content, 'knowledge/skills'))).length, 3)
 })
 
-test('schema 1 catalogs migrate their shared skill and preserve explicit choices with a backup on the first write', async t => {
-  const { json, read, origin, headers, content } = await fixture(t)
+test('schema 1 migration binds every old library to its original shared skill and projects live v1 responses', async t => {
+  const { json, read, origin, content, upload } = await fixture(t)
   const base = await read()
-  const created = await (await json('/api/admin/knowledge', { entry: entry({ id: 'metrics-retail' }), revision: base.revision })).json()
-  const wrongType = await fetch(origin + '/api/admin/knowledge/skills?name=a.md', {
-    method: 'POST', headers: { ...headers, 'Content-Type': 'text/plain', 'X-Revision': created.revision }, body: 'x',
-  })
-  assert.equal(wrongType.status, 415); assert.equal((await wrongType.json()).error, 'BINARY_REQUIRED')
+  const uploaded = await (await upload('/api/admin/knowledge/skills?name=shared.md', skillMarkdown('shared-skill'), { 'X-Revision': base.revision })).json()
+  await json('/api/admin/knowledge', { entry: entry({ id: 'metrics-retail' }), revision: uploaded.revision })
   const catalogPath = path.join(content, 'knowledge/catalog.json')
   const raw = JSON.parse(await readFile(catalogPath, 'utf8'))
-  raw.schemaVersion = 1; delete raw.skills
-  raw.skill = { name: 'shared-skill', file_name: 'shared.md', sha256: 'a'.repeat(64), size: 10, kind: 'md', uploaded_at: '2026-09-18T00:00:00.000Z' }
-  raw.items[0].skill = { ...raw.skill, name: 'ignored-skill' }
-  delete raw.items[0].skill_names
+  raw.schemaVersion = 1; raw.skill = raw.skills[0]; delete raw.skills; delete raw.legacy_skill_name; delete raw.items[0].skill_name
   raw.items[0].knowledge_retrieve_workflow_id = { get_card_index: 'wf-card-index', get_card_meta: 'wf-card-meta', quer_card_data: 'wf-legacy' }
-  raw.items.push({ ...raw.items[0], id: 'metrics-unbound', tenant_id: 'tenant-unbound', skill_names: [] })
-  raw.items.push({ ...raw.items[0], id: 'metrics-explicit', tenant_id: 'tenant-explicit', skill_names: ['shared-skill'] })
-  const original = JSON.stringify(raw)
-  await writeFile(catalogPath, original)
+  const original = JSON.stringify(raw); await writeFile(catalogPath, original)
   const reloaded = await new KnowledgeStore(content).list()
-  assert.equal(reloaded.schemaVersion, 2)
-  assert.deepEqual(reloaded.skills, [raw.skill])
-  assert.deepEqual(reloaded.items.map(item => item.skill_names), [['shared-skill'], [], ['shared-skill']])
-  assert.equal('skill' in reloaded.items[0]!, false)
-  assert.deepEqual(reloaded.items[0]!.knowledge_retrieve_workflow_id, { get_card_index: 'wf-card-index', get_card_meta: 'wf-card-meta', query_card_data: 'wf-legacy' })
+  assert.equal(reloaded.legacy_skill_name, 'shared-skill')
+  assert.equal(reloaded.items[0]!.skill_name, 'shared-skill')
+  assert.equal(reloaded.items[0]!.knowledge_retrieve_workflow_id.query_card_data, 'wf-legacy')
   assert.equal(await readFile(catalogPath, 'utf8'), original)
-  const pub = await (await fetch(origin + '/api/knowledge/metrics')).json()
-  assert.deepEqual(pub.items[0].skill_names, ['shared-skill'])
-  assert.equal(pub.items[0].knowledge_retrieve_workflow_id.query_card_data, 'wf-legacy')
-  // The schema 2 editor may intentionally use the former typo as a custom name.
-  const response = await json('/api/admin/knowledge', { entry: entry({ tenant_id: 'tenant-new', knowledge_retrieve_workflow_id: { quer_card_data: 'custom-value' } }), revision: reloaded.revision })
-  assert.equal(response.status, 200)
-  const result = await response.json()
-  assert.deepEqual(result.entry.knowledge_retrieve_workflow_id, { quer_card_data: 'custom-value' })
-  const stored = JSON.parse(await readFile(catalogPath, 'utf8'))
-  assert.equal(stored.schemaVersion, 2); assert.equal('skill' in stored, false)
-  assert.deepEqual(stored.items[0].skill_names, ['shared-skill'])
-  assert.ok(stored.items.every((item: Record<string, unknown>) => !('skill' in item)))
+  const before = await (await fetch(origin + '/api/knowledge/metrics')).json()
+  assert.equal(before.schemaVersion, 1); assert.equal(before.skill.name, 'shared-skill')
+  assert.equal(before.items[0].skill_name, undefined)
+  assert.equal(before.items[0].knowledge_retrieve_workflow_id.quer_card_data, 'wf-legacy')
+  let current = await (await upload('/api/admin/knowledge/skills?name=second.md', skillMarkdown('second-skill'), { 'X-Revision': reloaded.revision })).json()
+  assert.equal((await fetch(origin + '/api/knowledge/metrics/skill')).headers.get('x-skill-name'), 'shared-skill')
+  current = await (await json('/api/admin/knowledge/metrics-retail', { entry: entry({ skill_name: 'shared-skill', knowledge_retrieve_workflow_id: { get_card_index: 'changed-index', get_card_meta: 'changed-meta', query_card_data: 'changed-data', custom: 'custom-id' } }), revision: current.revision }, 'PUT')).json()
+  const old = await (await fetch(origin + '/api/knowledge/metrics')).json()
+  const next = await (await fetch(origin + '/api/knowledge/metrics/v2')).json()
+  assert.equal(old.items[0].knowledge_retrieve_workflow_id.query_card_data, 'changed-data')
+  assert.equal(old.items[0].knowledge_retrieve_workflow_id.custom, undefined)
+  assert.equal(next.items[0].knowledge_retrieve_workflow_id.custom, 'custom-id')
+  assert.equal(next.items[0].skill_name, 'shared-skill'); assert.equal(next.legacy_skill_name, undefined)
+  assert.notEqual(old.revision, next.revision)
+  assert.equal((await fetch(origin + '/api/knowledge/metrics/v2', { headers: { 'If-None-Match': `"${old.revision}"` } })).status, 200)
+  assert.equal((await fetch(origin + '/api/knowledge/metrics/v2', { headers: { 'If-None-Match': `"${next.revision}"` } })).status, 304)
   const backups = await readdir(path.join(content, 'knowledge/.trash'))
-  assert.equal(backups.length, 1)
-  assert.equal(await readFile(path.join(content, 'knowledge/.trash', backups[0]!), 'utf8'), original)
-  assert.equal((await new KnowledgeStore(content).list()).revision, result.revision)
+  assert.ok((await Promise.all(backups.map(name => readFile(path.join(content, 'knowledge/.trash', name), 'utf8')))).includes(original))
+  assert.equal((await new KnowledgeStore(content).list()).revision, current.revision)
+  assert.equal((await json('/api/admin/knowledge/skills/shared-skill', { revision: current.revision }, 'DELETE')).status, 409)
 })
 
-test('schema 1 entry-only skills stay ignored and no automatic reference is invented', async t => {
-  const { json, read, content } = await fixture(t)
-  const base = await read()
-  await json('/api/admin/knowledge', { entry: entry(), revision: base.revision })
-  const catalogPath = path.join(content, 'knowledge/catalog.json')
-  const raw = JSON.parse(await readFile(catalogPath, 'utf8'))
-  raw.schemaVersion = 1; delete raw.skills; delete raw.items[0].skill_names
-  raw.items[0].skill = { name: 'ignored-skill', file_name: 'legacy.md', sha256: 'a'.repeat(64), size: 10, kind: 'md', uploaded_at: '2026-09-18T00:00:00.000Z' }
-  await writeFile(catalogPath, JSON.stringify(raw))
-  const reloaded = await new KnowledgeStore(content).list()
-  assert.deepEqual(reloaded.skills, [])
-  assert.deepEqual(reloaded.items[0]!.skill_names, [])
-  assert.equal('skill' in reloaded.items[0]!, false)
+test('unpublished array references preserve ambiguous choices and recover the original identity from v1 backups', async t => {
+  const { json, read, content, upload, origin } = await fixture(t)
+  let current = await read()
+  for (const name of ['first-skill', 'second-skill']) current = await (await upload(`/api/admin/knowledge/skills?name=${name}.md`, skillMarkdown(name), { 'X-Revision': current.revision })).json()
+  await json('/api/admin/knowledge', { entry: entry({ id: 'metrics-retail', skill_name: 'first-skill' }), revision: current.revision })
+  const catalogPath = path.join(content, 'knowledge/catalog.json'), raw = JSON.parse(await readFile(catalogPath, 'utf8'))
+  delete raw.legacy_skill_name; delete raw.items[0].skill_name; raw.items[0].skill_names = ['first-skill', 'second-skill']
+  const original = JSON.stringify(raw); await writeFile(catalogPath, original)
+  current = await read()
+  assert.deepEqual(current.items[0].pending_skill_names, ['first-skill', 'second-skill'])
+  assert.equal((await fetch(origin + '/api/knowledge/metrics')).status, 503)
+  assert.deepEqual((await (await fetch(origin + '/api/knowledge/metrics/v2')).json()).items, [])
+  const noSelection = entry(); delete (noSelection as Record<string, unknown>).skill_name
+  assert.equal((await (await json('/api/admin/knowledge/metrics-retail', { entry: noSelection, revision: current.revision }, 'PUT')).json()).error, 'SKILL_SELECTION_REQUIRED')
+  current = await (await json('/api/admin/knowledge/compatibility', { legacy_skill_name: 'second-skill', revision: current.revision }, 'PUT')).json()
+  current = await (await json('/api/admin/knowledge/metrics-retail', { entry: entry({ skill_name: 'second-skill' }), revision: current.revision }, 'PUT')).json()
+  assert.equal(current.entry.pending_skill_names, undefined)
+  assert.equal((await (await fetch(origin + '/api/knowledge/metrics')).json()).items.length, 1)
+  const legacy = { schemaVersion: 1, updatedAt: raw.updatedAt, skill: raw.skills[1], items: raw.items.map(({ skill_names: _names, ...item }: any) => item) }
+  await mkdir(path.join(content, 'knowledge/.trash'), { recursive: true })
+  await writeFile(path.join(content, 'knowledge/.trash/catalog-9999.json'), JSON.stringify(legacy))
+  await writeFile(catalogPath, original)
+  assert.equal((await new KnowledgeStore(content).list()).legacy_skill_name, 'second-skill')
+  assert.equal(await readFile(catalogPath, 'utf8'), original)
 })
 
-test('workflow mappings accept arbitrary names and empty maps, trim rows, and reject invalid or ambiguous rows', async t => {
+test('workflow mappings accept custom method names and empty maps, trim rows, and reject invalid or ambiguous rows', async t => {
   const { json, read } = await fixture(t)
   const base = await read()
-  const response = await json('/api/admin/knowledge', { entry: entry({ id: 'metrics-custom', knowledge_retrieve_workflow_id: { ' 获取指标 ': ' wf-1 ', analysis: 'workflow-2', toString: 'workflow-3' } }), revision: base.revision })
+  const response = await json('/api/admin/knowledge', { entry: entry({ id: 'metrics-custom', knowledge_retrieve_workflow_id: { ' fetch_metrics ': ' wf-1 ', analysis: 'workflow-2', toString: 'workflow-3' } }), revision: base.revision })
   assert.equal(response.status, 200)
   const created = await response.json()
-  assert.deepEqual(created.entry.knowledge_retrieve_workflow_id, { '获取指标': 'wf-1', analysis: 'workflow-2', toString: 'workflow-3' })
+  assert.deepEqual(created.entry.knowledge_retrieve_workflow_id, { fetch_metrics: 'wf-1', analysis: 'workflow-2', toString: 'workflow-3' })
   const invalidMaps = [null, [], 'workflow', { key: '' }, { ' ': 'value' }, { key: 12 }, { key: 'a', ' key ': 'b' },
     { ["x".repeat(maxWorkflowName + 1)]: 'value' }, { key: 'x'.repeat(maxWorkflowValue + 1) },
     Object.fromEntries(Array.from({ length: maxKnowledgeWorkflows + 1 }, (_, index) => [`name-${index}`, 'value'])),
@@ -327,13 +332,13 @@ test('stored duplicate identities and dangling skill references fail closed with
   const { json, upload, read, content } = await fixture(t)
   const base = await read()
   const registered = await (await upload('/api/admin/knowledge/skills?name=skill.md', skillMarkdown(), { 'X-Revision': base.revision })).json()
-  await json('/api/admin/knowledge', { entry: entry({ skill_names: ['metric-skill'] }), revision: registered.revision })
+  await json('/api/admin/knowledge', { entry: entry({ skill_name: 'metric-skill' }), revision: registered.revision })
   const catalogPath = path.join(content, 'knowledge/catalog.json')
   const valid = JSON.parse(await readFile(catalogPath, 'utf8'))
   for (const mutate of [
     (raw: typeof valid) => { raw.skills.push(raw.skills[0]) },
-    (raw: typeof valid) => { raw.items[0].skill_names = ['metric-skill', 'metric-skill'] },
-    (raw: typeof valid) => { raw.items[0].skill_names = ['missing-skill'] },
+    (raw: typeof valid) => { raw.items[0].skill_name = ['metric-skill', 'metric-skill'] },
+    (raw: typeof valid) => { raw.items[0].skill_name = 'missing-skill' },
     (raw: typeof valid) => { raw.items.push(raw.items[0]) },
   ]) {
     const raw = structuredClone(valid); mutate(raw)
@@ -387,4 +392,84 @@ test('knowledge administration rejects anonymous, cross-origin and missing CSRF 
       assert.equal((await fetch(origin + route, { method: 'POST', headers: { ...headers, ...override, 'Content-Type': 'application/json' }, body: '{}' })).status, 403)
     }
   }
+})
+
+test('immutable skill downloads retain old versions after same-name replacement and reject mismatched names', async t => {
+  const { read, upload, origin } = await fixture(t)
+  const oldBytes = skillMarkdown('metric-skill'), nextBytes = skillMarkdown('metric-skill', '新版')
+  let current = await read()
+  current = await (await upload('/api/admin/knowledge/skills?name=old.md', oldBytes, { 'X-Revision': current.revision })).json()
+  const oldHash = current.skill.sha256
+  current = await (await upload('/api/admin/knowledge/skills?name=new.md', nextBytes, { 'X-Revision': current.revision })).json()
+  for (const [hash, bytes] of [[oldHash, oldBytes], [current.skill.sha256, nextBytes]] as const) {
+    const response = await fetch(`${origin}/api/knowledge/metrics/v2/skills/metric-skill/${hash}`)
+    assert.equal(response.status, 200); assert.match(response.headers.get('cache-control')!, /immutable/)
+    assert.deepEqual(Buffer.from(await response.arrayBuffer()), bytes)
+  }
+  assert.equal((await fetch(`${origin}/api/knowledge/metrics/v2/skills/another-skill/${oldHash}`)).status, 404)
+  assert.equal((await fetch(`${origin}/api/knowledge/metrics/v2/skills/metric-skill/${'a'.repeat(64)}`)).status, 404)
+})
+
+test('new compatible libraries appear in v1, custom-only and conflicting aliases remain v2-only', async t => {
+  const { read, json, origin } = await fixture(t)
+  let current = await read()
+  for (const [id, workflows] of Object.entries({ compatible: { get_card_index: 'i', get_card_meta: 'm', query_card_data: 'q' }, custom: { custom: 'x' }, conflict: { get_card_index: 'i', get_card_meta: 'm', query_card_data: 'q', quer_card_data: 'different' } })) {
+    current = await (await json('/api/admin/knowledge', { entry: entry({ id: `metrics-${id}`, tenant_id: id, knowledge_retrieve_workflow_id: workflows }), revision: current.revision })).json()
+  }
+  assert.deepEqual((await (await fetch(origin + '/api/knowledge/metrics')).json()).items.map((item: any) => item.id), ['metrics-compatible'])
+  assert.equal((await (await fetch(origin + '/api/knowledge/metrics/v2')).json()).items.length, 3)
+  current = await (await json('/api/admin/knowledge/metrics-compatible', { entry: entry({ tenant_id: 'compatible', enabled: false }), revision: current.revision }, 'PUT')).json()
+  assert.equal((await (await fetch(origin + '/api/knowledge/metrics')).json()).items.length, 0)
+  assert.equal((await (await fetch(origin + '/api/knowledge/metrics/v2')).json()).items.length, 2)
+})
+
+test('historical invalid method names survive ordinary edits but newly added invalid names are rejected', async t => {
+  const { read, json, content } = await fixture(t)
+  let current = await read()
+  await json('/api/admin/knowledge', { entry: entry({ id: 'metrics-retail' }), revision: current.revision })
+  const file = path.join(content, 'knowledge/catalog.json'), raw = JSON.parse(await readFile(file, 'utf8'))
+  raw.items[0].knowledge_retrieve_workflow_id = { '历史名称': 'original', run_code: 'reserved' }
+  await writeFile(file, JSON.stringify(raw)); current = await read()
+  const preserved = await json('/api/admin/knowledge/metrics-retail', { entry: entry({ tenant_name: '新名称', knowledge_retrieve_workflow_id: raw.items[0].knowledge_retrieve_workflow_id }), revision: current.revision }, 'PUT')
+  assert.equal(preserved.status, 200); current = await preserved.json()
+  for (const name of ['新的中文名称', 'space name', 'x'.repeat(65)]) {
+    const rejected = await json('/api/admin/knowledge/metrics-retail', { entry: entry({ knowledge_retrieve_workflow_id: { [name]: 'id' } }), revision: current.revision }, 'PUT')
+    assert.equal((await rejected.json()).error, 'INVALID_WORKFLOW_NAME')
+  }
+})
+
+test('schema 1 without a public skill keeps its original no-skill behavior', async t => {
+  const { read, json, content, origin } = await fixture(t)
+  const base = await read()
+  await json('/api/admin/knowledge', { entry: entry({ id: 'metrics-retail' }), revision: base.revision })
+  const file = path.join(content, 'knowledge/catalog.json'), raw = JSON.parse(await readFile(file, 'utf8'))
+  raw.schemaVersion = 1; delete raw.skills; delete raw.legacy_skill_name; delete raw.items[0].skill_name
+  await writeFile(file, JSON.stringify(raw))
+  const migrated = await new KnowledgeStore(content).list()
+  assert.equal(migrated.legacy_skill_name, null); assert.equal(migrated.items[0]!.skill_name, null)
+  const old = await (await fetch(origin + '/api/knowledge/metrics')).json()
+  assert.equal(old.items.length, 1); assert.equal(old.skill, undefined)
+  assert.equal((await fetch(origin + '/api/knowledge/metrics/skill')).status, 404)
+})
+
+test('a write exceeding the old 2 MiB response ceiling is rejected before changing the current catalog', async t => {
+  const { read, json, content, origin } = await fixture(t)
+  let current = await read()
+  await json('/api/admin/knowledge', { entry: entry({ id: 'metrics-retail' }), revision: current.revision })
+  const file = path.join(content, 'knowledge/catalog.json'), raw = JSON.parse(await readFile(file, 'utf8'))
+  const fullMeta = { knowledge_description: '描'.repeat(2000), typical_indicators: Array.from({ length: 50 }, () => '指'.repeat(80)) }
+  const seed = { ...raw.items[0], knowledge_base_meta: fullMeta }
+  raw.items = []
+  const projection = (items: typeof raw.items) => ({ schemaVersion: 1, updatedAt: raw.updatedAt, revision: 'a'.repeat(64), items: items.map(({ skill_name: _skill, ...item }: any) => ({ ...item, knowledge_retrieve_workflow_id: { ...item.knowledge_retrieve_workflow_id, quer_card_data: item.knowledge_retrieve_workflow_id.query_card_data } })) })
+  for (let index = 0; index < 500; index++) {
+    const candidate = [...raw.items, { ...seed, id: `metrics-${index}`, tenant_id: `tenant-${index}` }]
+    if (Buffer.byteLength(JSON.stringify(projection(candidate))) > 2 * 1024 ** 2) break
+    raw.items = candidate
+  }
+  const before = JSON.stringify(raw); await writeFile(file, before); current = await read()
+  assert.equal((await fetch(origin + '/api/knowledge/metrics')).status, 200)
+  const rejected = await json('/api/admin/knowledge', { entry: entry({ id: 'metrics-over-limit', tenant_id: 'tenant-over-limit', knowledge_base_meta: fullMeta }), revision: current.revision })
+  assert.equal(rejected.status, 503); assert.equal((await rejected.json()).error, 'KNOWLEDGE_CATALOG_TOO_LARGE')
+  assert.equal(await readFile(file, 'utf8'), before)
+  assert.equal((await fetch(origin + '/api/knowledge/metrics')).status, 200)
 })
