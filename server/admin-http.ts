@@ -19,12 +19,17 @@ export function createAdminHandler(releases: ReleaseAdmin, media: MediaStore, sy
         else { const data = await body(req); json(res, await knowledge.create(data.entry, data.revision)) }
         return true
       }
-      if (url.pathname === '/api/admin/knowledge/skill') {
-        // One companion Skill for the whole catalog.
-        method(req, ['POST', 'DELETE'])
+      if (url.pathname === '/api/admin/knowledge/skill' || url.pathname === '/api/admin/knowledge/skills') {
+        method(req, url.pathname.endsWith('/skills') ? ['POST'] : ['POST', 'DELETE'])
         json(res, req.method === 'POST'
           ? await knowledge.attachSkill(url.searchParams.get('name') ?? '', req, req.headers['x-revision'])
           : await knowledge.detachSkill((await body(req)).revision))
+        return true
+      }
+      const skillTarget = /^\/api\/admin\/knowledge\/skills\/([^/]+)$/.exec(url.pathname)
+      if (skillTarget) {
+        method(req, ['DELETE'])
+        json(res, await knowledge.detachSkill((await body(req)).revision, decodeURIComponent(skillTarget[1]!)))
         return true
       }
       const target = /^\/api\/admin\/knowledge\/([^/]+)$/.exec(url.pathname)

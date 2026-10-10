@@ -88,8 +88,9 @@ export function createHandler(config: WebsiteConfig, options: { clientRoot: stri
             res.setHeader('ETag', etag)
             json(req, res, 200, catalog); return
           }
-          if (url.pathname !== '/api/knowledge/metrics/skill') { json(req, res, 404, { error: 'NOT_FOUND' }); return }
-          const file = await store.openSkill()
+          const skillTarget = /^\/api\/knowledge\/metrics\/skills\/([^/]+)$/.exec(url.pathname)
+          if (url.pathname !== '/api/knowledge/metrics/skill' && !skillTarget) { json(req, res, 404, { error: 'NOT_FOUND' }); return }
+          const file = await store.openSkill(skillTarget ? decodeURIComponent(skillTarget[1]!) : undefined)
           // The address is fixed while the file is replaceable, so revalidate on the content hash instead of caching.
           res.setHeader('Cache-Control', 'no-store')
           res.setHeader('X-Skill-Name', file.name)

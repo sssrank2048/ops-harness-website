@@ -6,7 +6,7 @@ import type { IncomingMessage } from 'node:http'
 import { z } from 'zod'
 import { parseDocument } from 'yaml'
 import {
-  maxKnowledgeEntries, maxKnowledgeId, maxSkillArchiveBytes, maxSkillArchiveEntries, maxSkillDescription,
+  maxKnowledgeEntries, maxKnowledgeId, maxKnowledgeSkills, maxKnowledgeWorkflows, maxWorkflowName, maxWorkflowValue, maxSkillArchiveBytes, maxSkillArchiveEntries, maxSkillDescription,
   maxSkillFileBytes, maxSkillFileName, maxSkillName, maxTypicalIndicators, metricKnowledgeIdPattern, skillNamePattern,
   type MetricKnowledgeCatalog, type MetricKnowledgeEntry, type MetricKnowledgeSkill,
 } from '../shared/knowledge.js'
@@ -15,7 +15,20 @@ import { atomicJson, missing, readJson, receiveFile, safeDirectory, withLock } f
 
 const text = (max: number) => z.string().trim().min(1).max(max)
 const optionalText = (max: number) => z.string().trim().max(max).optional()
-const WorkflowSchema = z.object({ get_card_index: text(256), get_card_meta: text(256), query_card_data: text(256) }).strict()
+const WorkflowSchema = z.unknown().transform((input, ctx): Record<string, string> => {
+  const invalid = () => { ctx.addIssue({ code: 'custom', message: 'Invalid workflow mapping' }); return z.NEVER }
+  if (typeof input !== 'object' || input === null || Array.isArray(input)) return invalid()
+  const rows = Object.entries(input)
+  if (rows.length > maxKnowledgeWorkflows) return invalid()
+  const result: Record<string, string> = {}
+  for (const [rawName, rawValue] of rows) {
+    const name = rawName.trim()
+    if (!name || name.length > maxWorkflowName || ['__proto__', 'prototype', 'constructor'].includes(name) || Object.hasOwn(result, name)) return invalid()
+    if (typeof rawValue !== 'string' || !rawValue.trim() || rawValue.trim().length > maxWorkflowValue) return invalid()
+    result[name] = rawValue.trim()
+  }
+  return result
+})
 const KnowledgeIdSchema = z.object({ card_index_knowledge_base: text(256), card_meta_knowledge_base: text(256) }).strict()
 const MetaSchema = z.object({
   knowledge_description: text(2000),
@@ -28,22 +41,33 @@ const SkillSchema = z.object({
   kind: z.enum(['zip', 'md']), uploaded_at: z.string().datetime(),
 }).strict()
 const IdSchema = z.string().max(maxKnowledgeId).regex(metricKnowledgeIdPattern)
+const SkillNameSchema = z.string().max(maxSkillName).regex(skillNamePattern)
+const SkillNamesSchema = z.array(SkillNameSchema).max(maxKnowledgeSkills).refine(names => new Set(names).size === names.length)
 const InputSchema = z.object({
   id: IdSchema.optional(), tenant_name: text(80), tenant_id: text(128),
   knowledge_retrieve_workflow_id: WorkflowSchema, knowledge_id: KnowledgeIdSchema, knowledge_base_meta: MetaSchema,
-  enabled: z.boolean(),
+  enabled: z.boolean(), skill_names: SkillNamesSchema.optional(),
 }).strict()
 const EntrySchema = InputSchema.extend({
-  id: IdSchema, skill: SkillSchema.optional(), created_at: z.string().datetime(), updated_at: z.string().datetime(),
+  id: IdSchema, skill_names: SkillNamesSchema, created_at: z.string().datetime(), updated_at: z.string().datetime(),
 }).strict()
-const DocumentSchema = z.object({ schemaVersion: z.literal(1), updatedAt: z.string().datetime(), skill: SkillSchema.optional(), items: z.array(EntrySchema).max(maxKnowledgeEntries) }).strict()
+const DocumentSchema = z.object({ schemaVersion: z.literal(2), updatedAt: z.string().datetime(), skills: z.array(SkillSchema).max(maxKnowledgeSkills), items: z.array(EntrySchema).max(maxKnowledgeEntries) }).strict().superRefine((document, ctx) => {
+  const skillNames = new Set(document.skills.map(skill => skill.name))
+  if (skillNames.size !== document.skills.length || new Set(document.items.map(item => item.id)).size !== document.items.length ||
+      new Set(document.items.map(item => item.tenant_id)).size !== document.items.length || document.items.some(item => item.skill_names.some(name => !skillNames.has(name)))) {
+    ctx.addIssue({ code: 'custom', message: 'Duplicate identity or invalid skill reference' })
+  }
+})
+const LegacyDocumentSchema = z.object({ schemaVersion: z.literal(1), updatedAt: z.string().datetime(), skill: SkillSchema.optional(),
+  items: z.array(EntrySchema.extend({ skill: SkillSchema.optional(), skill_names: SkillNamesSchema.optional() })).max(maxKnowledgeEntries),
+}).strict()
 type CatalogDocument = z.infer<typeof DocumentSchema>
+type LoadedDocument = CatalogDocument & { revision: string; migrated: boolean }
 type KnowledgeInput = z.infer<typeof InputSchema>
 
 const fail = (code: string, status = 400): never => { throw new GuideError(code, status) }
 /**
- * The data workflow's real key is `query_card_data`. Catalogs and admin payloads written before 2026-09-19 spelled it
- * `quer_card_data`; that key is read as the new one (and dropped when both are present) so stored catalogs keep loading.
+ * Only schema 1 catalogs normalize this historical typo. Schema 2 allows arbitrary user-defined names.
  */
 function normaliseLegacyWorkflowKey(input: unknown): unknown {
   const fix = (entry: unknown): unknown => {
@@ -62,13 +86,13 @@ function normaliseLegacyWorkflowKey(input: unknown): unknown {
 }
 
 function parse<T>(schema: z.ZodType<T>, input: unknown, code = 'INVALID_KNOWLEDGE', status = 400): T {
-  const result = schema.safeParse(normaliseLegacyWorkflowKey(input))
+  const result = schema.safeParse(input)
   if (!result.success) return fail(code, status)
   return result.data
 }
 // The stored document never contains its own hash; `revision` is derived from the normalized bytes.
 const revisionOfDocument = (document: CatalogDocument) => revisionOf(JSON.stringify(document))
-const emptyDocument: CatalogDocument = { schemaVersion: 1, updatedAt: new Date(0).toISOString(), items: [] }
+const emptyDocument: CatalogDocument = { schemaVersion: 2, updatedAt: new Date(0).toISOString(), skills: [], items: [] }
 
 export function parseSkillFrontmatter(bytes: Buffer): { name: string; description: string } {
   if (bytes.length > maxSkillFileBytes) return fail('INVALID_SKILL_FILE')
@@ -187,20 +211,24 @@ export class KnowledgeStore {
   readonly skills: string
   constructor(directory: string) { this.root = path.join(directory, 'knowledge'); this.skills = path.join(this.root, 'skills') }
 
-  private async load(): Promise<CatalogDocument & { revision: string }> {
+  private async load(): Promise<LoadedDocument> {
     let raw: unknown
-    try { raw = await readJson(this.root, ['catalog.json'], 4 * 1024 ** 2) }
+    // Covers 500 fully populated entries, including worst-case escaped workflow keys and values.
+    try { raw = await readJson(this.root, ['catalog.json'], 96 * 1024 ** 2) }
     catch (error) {
-      if (missing(error)) return { ...emptyDocument, revision: revisionOfDocument(emptyDocument) }
+      if (missing(error)) return { ...emptyDocument, revision: revisionOfDocument(emptyDocument), migrated: false }
       if (error instanceof GuideError) throw error
       return fail('CONTENT_UNAVAILABLE', 503)
     }
-    const parsed = parse(DocumentSchema, raw, 'CONTENT_UNAVAILABLE', 503)
-    // Catalogs written before the skill became catalog-wide carried one per entry; that field is ignored.
-    const document: CatalogDocument = { ...parsed, items: parsed.items.map(stripLegacySkill) }
-    if (new Set(document.items.map(item => item.id)).size !== document.items.length) return fail('CONTENT_UNAVAILABLE', 503)
-    if (new Set(document.items.map(item => item.tenant_id)).size !== document.items.length) return fail('CONTENT_UNAVAILABLE', 503)
-    return { ...document, revision: revisionOfDocument(document) }
+    const migrated = typeof raw === 'object' && raw !== null && (raw as { schemaVersion?: unknown }).schemaVersion === 1
+    if (migrated) {
+      const legacy = parse(LegacyDocumentSchema, normaliseLegacyWorkflowKey(raw), 'CONTENT_UNAVAILABLE', 503)
+      raw = { schemaVersion: 2, updatedAt: legacy.updatedAt, skills: legacy.skill ? [legacy.skill] : [], items: legacy.items.map(({ skill: _ignored, ...item }) => ({
+        ...item, skill_names: item.skill_names ?? (legacy.skill ? [legacy.skill.name] : []),
+      })) }
+    }
+    const document = parse(DocumentSchema, raw, 'CONTENT_UNAVAILABLE', 503)
+    return { ...document, revision: revisionOfDocument(document), migrated }
   }
   private async backup() {
     const trash = path.join(this.root, '.trash')
@@ -209,13 +237,13 @@ export class KnowledgeStore {
     const stamp = new Date().toISOString().replace(/[:.]/g, '-')
     await copyFile(path.join(this.root, 'catalog.json'), path.join(trash, `catalog-${stamp}.json`))
   }
-  private async commit(items: MetricKnowledgeEntry[], skill: MetricKnowledgeSkill | undefined, destructive: boolean) {
-    const document = parse(DocumentSchema, { schemaVersion: 1, updatedAt: new Date().toISOString(), ...(skill ? { skill } : {}), items })
+  private async commit(items: MetricKnowledgeEntry[], skills: MetricKnowledgeSkill[], destructive: boolean) {
+    const document = parse(DocumentSchema, { schemaVersion: 2, updatedAt: new Date().toISOString(), skills, items })
     if (destructive) await this.backup()
     await atomicJson(this.root, 'catalog.json', document)
     return { ...document, revision: revisionOfDocument(document) }
   }
-  private change<T>(expected: unknown, action: (current: CatalogDocument & { revision: string }) => Promise<T>) {
+  private change<T>(expected: unknown, action: (current: LoadedDocument) => Promise<T>) {
     return withLock(this.root, '.knowledge-lock', async () => {
       const current = await this.load()
       if (current.revision !== expected) return fail('REVISION_CONFLICT', 409)
@@ -227,14 +255,23 @@ export class KnowledgeStore {
     if (!entry) return fail('KNOWLEDGE_NOT_FOUND', 404)
     return entry
   }
-  private async replace(current: CatalogDocument & { revision: string }, entry: MetricKnowledgeEntry, destructive: boolean) {
-    const document = await this.commit(current.items.map(item => item.id === entry.id ? entry : item), current.skill, destructive)
+  private async replace(current: LoadedDocument, entry: MetricKnowledgeEntry, destructive: boolean) {
+    const document = await this.commit(current.items.map(item => item.id === entry.id ? entry : item), current.skills, destructive || current.migrated)
     return { revision: document.revision, updatedAt: document.updatedAt, entry: this.found(document, entry.id) }
+  }
+  private validateReferences(current: CatalogDocument, names: string[]) {
+    if (names.some(name => !current.skills.some(skill => skill.name === name))) return fail('INVALID_SKILL_REFERENCE')
+  }
+  private selectSkill(current: CatalogDocument, name?: string) {
+    if (name === undefined && current.skills.length > 1) return fail('SKILL_NAME_REQUIRED', 409)
+    const skill = name === undefined ? current.skills[0] : current.skills.find(skill => skill.name === name)
+    if (!skill) return fail('SKILL_NOT_FOUND', 404)
+    return skill
   }
 
   async list(): Promise<MetricKnowledgeCatalog> {
-    const { revision, ...document } = await this.load()
-    return { schemaVersion: 1, revision, updatedAt: document.updatedAt, ...(document.skill ? { skill: document.skill } : {}), items: document.items }
+    const { migrated: _migrated, ...catalog } = await this.load()
+    return catalog
   }
   async publicList(): Promise<MetricKnowledgeCatalog> {
     const catalog = await this.list()
@@ -249,8 +286,10 @@ export class KnowledgeStore {
       if (!id) do { id = `metrics-${randomBytes(5).toString('hex')}` } while (current.items.some(item => item.id === id))
       if (current.items.some(item => item.id === id)) return fail('KNOWLEDGE_ID_TAKEN', 409)
       if (current.items.some(item => item.tenant_id === value.tenant_id)) return fail('TENANT_ID_TAKEN', 409)
+      const skill_names = value.skill_names ?? []
+      this.validateReferences(current, skill_names)
       const now = new Date().toISOString()
-      const document = await this.commit([...current.items, { id, ...rest, created_at: now, updated_at: now }], current.skill, false)
+      const document = await this.commit([...current.items, { id, ...rest, skill_names, created_at: now, updated_at: now }], current.skills, current.migrated)
       return { revision: document.revision, updatedAt: document.updatedAt, entry: this.found(document, id) }
     })
   }
@@ -263,19 +302,21 @@ export class KnowledgeStore {
       const previous = this.found(current, id)
       if (current.items.some(item => item.id !== id && item.tenant_id === value.tenant_id)) return fail('TENANT_ID_TAKEN', 409)
       const { id: ignored, ...rest } = value
-      return this.replace(current, { id, ...rest, created_at: previous.created_at, updated_at: new Date().toISOString() }, true)
+      const skill_names = value.skill_names ?? previous.skill_names
+      this.validateReferences(current, skill_names)
+      return this.replace(current, { id, ...rest, skill_names, created_at: previous.created_at, updated_at: new Date().toISOString() }, true)
     })
   }
   async remove(id: string, expected: unknown) {
     parse(IdSchema, id)
     return this.change(expected, async current => {
       this.found(current, id)
-      // The shared skill file is catalog-wide and stays; other entries keep using it.
-      const document = await this.commit(current.items.filter(item => item.id !== id), current.skill, true)
+      // Deleting a library leaves registered skills and immutable file bytes intact.
+      const document = await this.commit(current.items.filter(item => item.id !== id), current.skills, true)
       return { revision: document.revision, updatedAt: document.updatedAt }
     })
   }
-  /** Attach the catalog-wide companion Skill; every bound library installs this one file. */
+  /** Register a Skill, replacing the file for the same stable name without changing references. */
   async attachSkill(name: string, req: IncomingMessage, expected: unknown) {
     if (unsafeFileName(name)) return fail('INVALID_SKILL_FILE')
     const kind = /\.zip$/i.test(name) ? 'zip' as const : /\.md$/i.test(name) ? 'md' as const : fail('INVALID_SKILL_FILE')
@@ -287,38 +328,38 @@ export class KnowledgeStore {
       const sha256 = createHash('sha256').update(bytes).digest('hex')
       const stored = `${sha256}.${kind}`
       return await this.change(expected, async current => {
+        const existing = current.skills.some(item => item.name === skill.name)
+        if (!existing && current.skills.length >= maxKnowledgeSkills) return fail('KNOWLEDGE_SKILL_LIMIT', 409)
         // Content-addressed and immutable: an identical file is reused, never rewritten.
         try {
           const info = await lstat(path.join(this.skills, stored))
           if (!info.isFile() || info.isSymbolicLink() || info.size !== file.size) return fail('CONTENT_UNAVAILABLE', 503)
         } catch (error) { if (!missing(error)) throw error; await rename(file.temp, path.join(this.skills, stored)) }
         const value: MetricKnowledgeSkill = { name: skill.name, file_name: name, sha256, size: file.size, kind, uploaded_at: new Date().toISOString() }
-        const document = await this.commit(current.items, value, Boolean(current.skill))
-        return { revision: document.revision, updatedAt: document.updatedAt, skill: document.skill }
+        const skills = existing ? current.skills.map(item => item.name === value.name ? value : item) : [...current.skills, value]
+        const document = await this.commit(current.items, skills, existing || current.migrated)
+        return { revision: document.revision, updatedAt: document.updatedAt, skill: value, skills: document.skills }
       })
     } finally { await unlink(file.temp).catch(error => { if (!missing(error)) throw error }) }
   }
-  async detachSkill(expected: unknown) {
+  async detachSkill(expected: unknown, name?: string) {
+    if (name !== undefined) parse(SkillNameSchema, name)
     return this.change(expected, async current => {
-      if (!current.skill) return fail('SKILL_NOT_FOUND', 404)
-      const document = await this.commit(current.items, undefined, true)
+      const skill = this.selectSkill(current, name)
+      if (current.items.some(item => item.skill_names.includes(skill.name))) return fail('SKILL_IN_USE', 409)
+      const document = await this.commit(current.items, current.skills.filter(item => item.name !== skill.name), true)
       return { revision: document.revision, updatedAt: document.updatedAt }
     })
   }
-  async openSkill() {
+  async openSkill(skillName?: string) {
+    if (skillName !== undefined && !SkillNameSchema.safeParse(skillName).success) return fail('SKILL_NOT_FOUND', 404)
     const document = await this.load()
-    if (!document.skill) return fail('SKILL_NOT_FOUND', 404)
-    const { name, sha256, size, kind, file_name: fileName } = document.skill
+    const { name, sha256, size, kind, file_name: fileName } = this.selectSkill(document, skillName)
     return {
       root: this.root, segments: ['skills', `${sha256}.${kind}`], size, sha256, name, fileName,
       type: kind === 'zip' ? 'application/zip' : 'text/markdown; charset=utf-8',
     }
   }
-}
-
-function stripLegacySkill(entry: MetricKnowledgeEntry & { skill?: unknown }): MetricKnowledgeEntry {
-  const { skill: _legacy, ...rest } = entry
-  return rest
 }
 
 function unsafeFileName(name: string): boolean {
