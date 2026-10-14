@@ -21,9 +21,9 @@ pnpm --dir packages/shared/release-contract pack --pack-destination /path/to/ops
 
 `dsh-ops-expert-distribution-contract-<版本>-<sha256前12位>.tgz` 来自产品仓库 `packages/shared/expert-distribution-contract`
 的 pnpm pack：专家包、云端目录、可见性规则、自定义工具可移植定义与常用场景规则（0.1.1 起，含不依赖 zod 的 `/scenarios` 子入口），
-官网与工作助手共用同一份结构和校验。当前为 0.2.4（补齐内置工具 `dataops-tool`，显示名统一为 DataAgent连接器 / DataOps连接器；单个技能的共用规则 `./skill-tree` 与放宽的分发上限：30 个技能、单个 200 MB、整包 1 GB；
+官网与工作助手共用同一份结构和校验。当前为 0.2.5（补齐 `multimedia` 多媒体创作，覆盖当前产品实际装配的全部九项内置工具；包含 `dataops-tool`，显示名沿用 DataAgent连接器 / DataOps连接器；单个技能的共用规则 `./skill-tree` 与放宽的分发上限：30 个技能、单个 200 MB、整包 1 GB；
 0.2.1 起 `.git`、`node_modules`、`.venv` 等依赖与版本库目录、IDE 配置、Python 缓存与 Office 临时文件，0.2.2 起 `package-lock.json` 等依赖锁文件不算技能内容、不计数），
-输入与产品仓库提交 ff51d2c4（分支 codex/dataops-expert-contract）的源码逐文件一致；该提交基于官网原用的 ca33fb8，仅补 DataOps 清单、官网连接器中文显示名与回归测试，客户端工具描述与实现保持原样，不包含后续 MCP 子工具配置扩展。0.2.2、0.2.3 制品保留用于审计，不再被当前依赖引用。来源提交、输入哈希与
+输入与产品仓库提交 abedc43c（分支 codex/dataops-expert-contract）的源码逐文件一致；该提交基于官网原用的 ca33fb8，仅补 DataOps、多媒体创作清单、官网连接器中文显示名与回归测试，客户端工具描述与实现保持原样，不包含后续 MCP 子工具配置扩展。0.2.2、0.2.3、0.2.4 制品保留用于审计，不再被当前依赖引用。来源提交、输入哈希与
 制品 SHA-256 见 [expert-distribution-contract.json](expert-distribution-contract.json)，`test/standalone.test.ts` 核对制品、
 安装包与契约版本。更新时在产品仓库完成契约 build/test 后 pack 到 vendor，以内容哈希命名新制品，更新 package.json、来源清单
 与锁文件，再执行官网 `pnpm install --no-frozen-lockfile` 与 check/build。

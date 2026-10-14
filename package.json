@@ -14,7 +14,7 @@
     "check": "pnpm typecheck && pnpm test"
   },
   "dependencies": {
-    "@dsh-ops/expert-distribution-contract": "file:vendor/dsh-ops-expert-distribution-contract-0.2.4-8737220b1174.tgz",
+    "@dsh-ops/expert-distribution-contract": "file:vendor/dsh-ops-expert-distribution-contract-0.2.5-1051d1a6370e.tgz",
     "@dsh-ops/release-contract": "file:vendor/dsh-ops-release-contract-0.1.3.tgz",
     "@dsh-ops/tracking-contract": "file:vendor/dsh-ops-tracking-contract-0.1.0-f76676da1bb6.tgz",
     "@phosphor-icons/vue": "2.2.1",

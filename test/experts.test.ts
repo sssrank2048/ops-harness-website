@@ -44,6 +44,18 @@ function archive(files: { name: string; data?: Buffer }[]) {
 const sha = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex')
 const skillZip = (name: string, body = '按步骤撰写推送文案。') => archive([{ name: `${name}/SKILL.md`, data: Buffer.from(`---\nname: ${name}\ndescription: ${name} 的说明\n---\n\n# 用法\n\n${body}\n`, 'utf8') }])
 const owner = { name: '张三', employeeId: 'z00123456' }
+// Pin the shipped client inventory independently of the contract; custom and unshipped tools stay out.
+const shippedBuiltinTools = [
+  { id: 'webfetch', name: '网页抓取' },
+  { id: 'browser', name: '浏览器操作' },
+  { id: 'multimedia', name: '多媒体创作' },
+  { id: 'metric-query', name: '指标查询' },
+  { id: 'data-asset-query', name: '数据资产查询' },
+  { id: 'data-agent-tool', name: 'DataAgent连接器' },
+  { id: 'dataops-tool', name: 'DataOps连接器' },
+  { id: 'welink', name: 'WeLink' },
+  { id: 'operations-platform-auth', name: '运营平台认证' },
+]
 
 function draft(extra: Record<string, unknown> = {}) {
   return {
@@ -165,24 +177,23 @@ test('drafts are validated, published immutably and versioned', async t => {
   assert.deepEqual(await readdir(path.join(f.content, 'experts', 'versions', 'push-ops')), ['1.json'])
 })
 
-test('DataOps is offered as a built-in tool and its optional reference survives saving and publishing', async t => {
+test('all shipped built-in tools are offered and their references survive saving and publishing', async t => {
   const f = await fixture(t)
   const options = await fetch(f.origin + '/api/admin/experts/options', { headers: f.headers })
   assert.equal(options.status, 200)
   const availableTools = (await options.json()).tools
-  assert.deepEqual(availableTools.find((tool: { id: string }) => tool.id === 'data-agent-tool'), { id: 'data-agent-tool', name: 'DataAgent连接器' })
-  assert.deepEqual(availableTools.find((tool: { id: string }) => tool.id === 'dataops-tool'), { id: 'dataops-tool', name: 'DataOps连接器' })
+  assert.deepEqual(availableTools, shippedBuiltinTools)
 
-  const created = await f.json('/api/admin/experts', { id: 'dataops-ops', draft: draft(), revision: (await f.list()).revision })
+  const created = await f.json('/api/admin/experts', { id: 'builtin-tools-ops', draft: draft(), revision: (await f.list()).revision })
   assert.equal(created.status, 200)
-  const tools = [{ toolId: 'dataops-tool', required: false }]
-  const saved = await f.json('/api/admin/experts/dataops-ops', { draft: draft({ tools }), revision: (await created.json()).revision }, 'PUT')
+  const tools = shippedBuiltinTools.map((tool, index) => ({ toolId: tool.id, required: index % 2 === 1 }))
+  const saved = await f.json('/api/admin/experts/builtin-tools-ops', { draft: draft({ tools }), revision: (await created.json()).revision }, 'PUT')
   assert.equal(saved.status, 200)
   const savedBody = await saved.json()
   assert.deepEqual(savedBody.expert.draft.tools, tools)
-  const published = await f.json('/api/admin/experts/dataops-ops/publish', { revision: savedBody.revision })
+  const published = await f.json('/api/admin/experts/builtin-tools-ops/publish', { revision: savedBody.revision })
   assert.equal(published.status, 200)
-  const snapshot = JSON.parse(await readFile(path.join(f.content, 'experts', 'versions', 'dataops-ops', '1.json'), 'utf8'))
+  const snapshot = JSON.parse(await readFile(path.join(f.content, 'experts', 'versions', 'builtin-tools-ops', '1.json'), 'utf8'))
   assert.deepEqual(snapshot.content.tools, tools)
   const catalog = await f.catalog(owner.employeeId)
   assert.equal(catalog.status, 200)
@@ -277,15 +288,16 @@ test('an expert package imports as a draft and matches its origin on re-import',
   assert.match(updated.draft.responsibility, /新版职责/)
 })
 
-test('a package with required DataOps previews as known and retains its built-in reference after import', async t => {
+test('a package with all shipped built-in tools previews as known and retains its references after import', async t => {
   const f = await fixture(t)
-  const tools = [{ toolId: 'dataops-tool', required: true }]
+  // Reverse the saved-draft flags above so every tool also travels with the other required value.
+  const tools = shippedBuiltinTools.map((tool, index) => ({ toolId: tool.id, required: index % 2 === 0 }))
   const uploaded = await f.upload('/api/admin/experts/import', expertPackage({ definition: { tools } }))
   assert.equal(uploaded.status, 200)
   const { preview } = await uploaded.json()
-  assert.deepEqual(preview.tools, [{ toolId: 'dataops-tool', name: 'DataOps连接器', required: true, known: true }])
+  assert.deepEqual(preview.tools, shippedBuiltinTools.map((tool, index) => ({ toolId: tool.id, name: tool.name, required: index % 2 === 0, known: true })))
   assert.deepEqual(preview.errors, [])
-  const applied = await f.json(`/api/admin/experts/import/${preview.importId}/apply`, { target: { mode: 'create', id: 'dataops-ops' }, publish: true, revision: (await f.list()).revision })
+  const applied = await f.json(`/api/admin/experts/import/${preview.importId}/apply`, { target: { mode: 'create', id: 'builtin-tools-ops' }, publish: true, revision: (await f.list()).revision })
   assert.equal(applied.status, 200)
   const expert = (await applied.json()).expert
   assert.deepEqual(expert.draft.tools, tools)
